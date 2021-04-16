@@ -3,17 +3,53 @@ import * as ecs from '@aws-cdk/aws-ecs';
 import * as elbv2 from '@aws-cdk/aws-elasticloadbalancingv2';
 import * as efs from '@aws-cdk/aws-efs';
 import * as ec2 from '@aws-cdk/aws-ec2';
-import { Protocol, SubnetType } from '@aws-cdk/aws-ec2';
+import { SubnetType } from '@aws-cdk/aws-ec2';
 import { LogGroup, RetentionDays } from "@aws-cdk/aws-logs";
 import { AwsLogDriver } from '@aws-cdk/aws-ecs';
-import { ManagedPolicy, Role, ServicePrincipal } from '@aws-cdk/aws-iam';
+import { Role, ServicePrincipal } from '@aws-cdk/aws-iam';
 import * as servicediscovery from '@aws-cdk/aws-servicediscovery';
 import { RemovalPolicy } from '@aws-cdk/core';
 import * as aws_ecs_patterns from "@aws-cdk/aws-ecs-patterns";
+import route53 = require('@aws-cdk/aws-route53');
+import acm = require('@aws-cdk/aws-certificatemanager');
+
+/**
+ * This stack relies on getting the domain name from CDK context.
+ * Use 'cdk synth -c domain=mystaticsite.com -c subdomain=www'
+ * Or add/update the following to cdk.json:
+ * {
+ *   "context": {
+ *     "domain": "mystaticsite.com",
+ *     "subdomain": "www"
+ *   }
+ * }
+**/
+
 
 export class Od4EEcsCdkStack extends cdk.Stack {
   constructor(scope: cdk.Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
+
+    // -------------------------------------------------------
+    // Get props and check domain access
+    // -------------------------------------------------------
+
+    const domain = this.node.tryGetContext('domain');
+    const subdomain = this.node.tryGetContext('subdomain');
+
+    const zone = route53.HostedZone.fromLookup(this, 'Zone', { domainName: domain });
+    const siteDomain = subdomain + '.' + domain;
+    new cdk.CfnOutput(this, 'Site', { value: 'https://' + siteDomain });
+
+    // -------------------------------------------------------
+    // Create TLS cert for ALB
+    // -------------------------------------------------------
+
+    const certificate = new acm.DnsValidatedCertificate(this, 'SiteCertificate', {
+      domainName: siteDomain,
+      hostedZone: zone
+    });
+    new cdk.CfnOutput(this, 'Certificate', { value: certificate.certificateArn });
 
     // -------------------------------------------------------
     // Setup global constructs
@@ -35,7 +71,6 @@ export class Od4EEcsCdkStack extends cdk.Stack {
 
     // -------------------------------------------------------
     // Setup Cloud Map Service Discovery
-    // service discovery config... https://stackoverflow.com/questions/66799660/using-cdk-to-define-ecs-fargate-cluster-with-service-discovery-without-load-bal
     // -------------------------------------------------------
 
     const serviceName = "cluster";
@@ -130,14 +165,10 @@ export class Od4EEcsCdkStack extends cdk.Stack {
     const od4eContainer = od4eTaskDefinition.addContainer("odfe-node1", {
       image: ecs.ContainerImage.fromRegistry("amazon/opendistro-for-elasticsearch:1.12.0"),
       environment: {
-        //'cluster.name': 'odfe-cluster',
         'node.name': `${serviceName + '.' + namespaceName}`,
         'discovery.type': 'single-node',
-        //'discovery.seed_hosts': `${serviceName + '.' + namespaceName}`, //'odfe-node1,odfe-node2'
-        //'cluster.initial_master_nodes': `${serviceName + '.' + namespaceName}`,
         'bootstrap.memory_lock': 'true',
         'ES_JAVA_OPTS': '-Xms512m -Xmx512m',
-        //'sonar.search.javaAdditionalOpts': '-Dnode.store.allow_mmapfs=false'
       },
       logging: new AwsLogDriver({
         logGroup: od4eLogGroup,
@@ -181,12 +212,6 @@ export class Od4EEcsCdkStack extends cdk.Stack {
       },
     });
 
-    // enable ECS Execute Command incase we need to jump inside a container to debug
-    /* const myCfnService = od4eService.service as any;
-    const cfnService = myCfnService.resource as ecs.CfnService;
-    cfnService.enableExecuteCommand = true; */
-
-
     // -------------------------------------------------------
     // Setup Kibana node
     // -------------------------------------------------------
@@ -219,24 +244,15 @@ export class Od4EEcsCdkStack extends cdk.Stack {
       taskDefinition: kibanaTaskDefinition,
       securityGroups: [od4eSg],
       platformVersion: ecs.FargatePlatformVersion.VERSION1_4,
-
-      // todo: add R53 and ACM so we can do SSL...
-      //certificate:
-      //domainName:
-      //redirectHTTP: true,
-      //protocol: elbv2.ApplicationProtocol.HTTPS,
+      certificate,
+      domainName: siteDomain,
+      domainZone: zone,
+      redirectHTTP: true,
+      protocol: elbv2.ApplicationProtocol.HTTPS,
     });
 
     // change healthcheck to support drupal setup process
     kibanaService.targetGroup.configureHealthCheck({healthyHttpCodes: '200-499',path: '/'});
- 
-    /* const kibanaService = new ecs.FargateService(this, 'kibanaService', {
-      cluster,
-      taskDefinition: kibanaTaskDefinition,
-      circuitBreaker: { rollback: true },
-      platformVersion: ecs.FargatePlatformVersion.VERSION1_4,
-      securityGroups: [od4eSg],
-    }); */
 
     od4eService.connections.allowFrom(fileSystem, ec2.Port.tcp(2049));
     od4eService.connections.allowTo(fileSystem, ec2.Port.tcp(2049));
@@ -244,16 +260,5 @@ export class Od4EEcsCdkStack extends cdk.Stack {
     od4eService.connections.allowTo(kibanaService.service, ec2.Port.tcp(9200));
     fileSystem.connections.allowFrom(od4eService,ec2.Port.tcp(9200));
     fileSystem.connections.allowTo(od4eService,ec2.Port.tcp(9200));
-
-    /* const lb = new elbv2.ApplicationLoadBalancer(this, 'LB', { vpc, internetFacing: true });
-    const listener = lb.addListener('Listener', { port: 80 });
-    const targetGroup = listener.addTargets('ECS1', {
-      port: 5601,
-      protocol: elbv2.ApplicationProtocol.HTTP,
-      targets: [kibanaService]
-    });
-
-    console.log(od4eService.serviceName + '.' + namespace.namespaceName) */
-
   }
 }

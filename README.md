@@ -1,7 +1,8 @@
 # od4e-ecs-cdk
 CDK project to deploy an OpenDistro for Elastic Search cluster in ECS Fargate.
 
-## Issues
+## TODO
 
-* Kibana can't access OD4E node
-* OD4E node AccessDeniedException accessing EFS mountpoint
+* Redirect config folders for OD4E and Kibana to EFS shares.
+* Set admin password for kibana
+

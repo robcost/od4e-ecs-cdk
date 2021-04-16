@@ -8,3 +8,4 @@ node_modules
 cdk.out
 out/*
 .DS_Store
+cdk.context.json
